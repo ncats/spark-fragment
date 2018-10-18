@@ -221,11 +221,11 @@ public class SparkProbeDb implements AutoCloseable {
                                props.getProperty("username"),
                                props.getProperty("password"))) {
             Dataset<Row> df = probedb
-                /*
                 .load("(select * from ncgc_sample "
-                      +"where smiles_iso is not null and rownum <= 1000)")
-                */
-                .registry()
+                      +"where smiles_iso is not null"
+                      //+"and rownum <= 1000"
+                      +")"
+                      )
                 ;
             df.printSchema();
             probedb.generateFragments(df, "fragments");
