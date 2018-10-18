@@ -136,7 +136,7 @@ public class SparkProbeDb implements AutoCloseable {
         
         spark = SparkSession
             .builder()
-            .config("spark.master", "local[*]")
+            .master("local[*]")
             .config("spark.driver.bindAddress", "127.0.0.1")
             .config("spark.driver.host", "127.0.0.1")
             .appName(SparkProbeDb.class.getName())
@@ -162,7 +162,7 @@ public class SparkProbeDb implements AutoCloseable {
             .option("user", username)
             .option("password", password)
             .option("driver", "oracle.jdbc.driver.OracleDriver")
-            .option("numPartitions", 10)
+            //.option("numPartitions", 10)
             .load();
     }
 
@@ -223,7 +223,7 @@ public class SparkProbeDb implements AutoCloseable {
             Dataset<Row> df = probedb
                 .load("(select * from ncgc_sample "
                       +"where smiles_iso is not null"
-                      //+"and rownum <= 1000"
+                      //+" and rownum <= 1000"
                       +")"
                       )
                 ;
