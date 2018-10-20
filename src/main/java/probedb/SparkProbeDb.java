@@ -4,6 +4,7 @@ import java.io.*;
 import java.nio.file.*;
 import java.util.*;
 import java.net.URL;
+import java.sql.*;
 import java.text.SimpleDateFormat;
 import java.util.zip.GZIPInputStream;
 import java.util.function.Consumer;
@@ -121,6 +122,61 @@ public class SparkProbeDb implements AutoCloseable {
                 .asScala().toMap(Predef.<Tuple2<A, B>>conforms());
         }
     }
+
+    public static class QuerySamples
+        implements Function<String, Row>, AutoCloseable {
+        final String jdbcUrl;
+        final String username;
+        final String password;
+
+        transient Connection con;
+        transient PreparedStatement pstm;
+
+        public QuerySamples (String jdbcUrl,
+                             String username, String password) {
+            this.jdbcUrl = jdbcUrl;
+            this.username = username;
+            this.password = password;
+        }
+
+        Connection getConnection () throws SQLException {
+            if (con == null)
+                con = DriverManager.getConnection(jdbcUrl, username, password);
+            return con;
+        }
+
+        ResultSet getSample (String id) throws SQLException {
+            if (pstm == null) {
+                pstm = getConnection().prepareStatement
+                 ("select smiles_iso,supplier_id "
+                  +"from ncgc_sample where sample_id = ? "
+                  +"and smiles_iso is not null");
+            }
+            pstm.setString(1, id);
+            return pstm.executeQuery();
+        }
+
+        public Row call (String id) {
+            try (ResultSet rs = getSample (id)) {
+                if (rs.next()) {
+                    String smiles = rs.getString("smiles_iso");
+                    String supplier = rs.getString("supplier_id");
+                    return RowFactory.create(smiles, id, supplier);
+                }
+            }
+            catch (SQLException ex) {
+                logger.log(Level.SEVERE, "Can't execute query for "+id, ex);
+                ex.printStackTrace();
+            }
+            
+            return RowFactory.create(null, id, null);
+        }
+
+        public void close () throws Exception {
+            if (con != null)
+                con.close();
+        }
+    }
     
     final String jdbcUrl;
     final String username;
@@ -151,10 +207,10 @@ public class SparkProbeDb implements AutoCloseable {
     }
 
     public Dataset<Row> registry () throws Exception {
-        return load ("ncgc_sample");
+        return loadSQL ("ncgc_sample");
     }
     
-    public Dataset<Row> load (String sql) throws Exception {
+    public Dataset<Row> loadSQL (String sql) throws Exception {
         return spark.read()
             .format("jdbc")
             .option("url", jdbcUrl)
@@ -164,6 +220,20 @@ public class SparkProbeDb implements AutoCloseable {
             .option("driver", "oracle.jdbc.driver.OracleDriver")
             //.option("numPartitions", 10)
             .load();
+    }
+
+    public Dataset<Row> loadFile (String file) throws Exception {
+        try (QuerySamples qmap = new QuerySamples
+             (jdbcUrl, username, password)) {
+            StructType schema = new StructType ()
+                .add("SMILES_ISO", DataTypes.StringType)
+                .add("SAMPLE_ID", DataTypes.StringType)
+                .add("SUPPLIER_ID", DataTypes.StringType)
+                ;
+            JavaSparkContext jsc = new JavaSparkContext (spark.sparkContext());
+            return spark.createDataFrame
+                (jsc.textFile(file).map(qmap), schema);
+        }
     }
 
     public Dataset<Row> generateFragments (Dataset<Row> df, String output)
@@ -198,6 +268,7 @@ public class SparkProbeDb implements AutoCloseable {
             .mode(SaveMode.Overwrite)
             .format("com.databricks.spark.csv")
             .option("delimiter", "\t")
+            .option("header", "true")
             .save(output);
         
         logger.info("### number of rows: "+df.count());
@@ -206,7 +277,8 @@ public class SparkProbeDb implements AutoCloseable {
 
     public static void main (String[] argv) throws Exception {
         if (argv.length == 0) {
-            logger.info("Usage: "+SparkProbeDb.class.getName()+" DB.props");
+            logger.info("Usage: "+SparkProbeDb.class.getName()
+                        +" DB.props [SAMPLE_FILE]");
             logger.info("where DB.props is a standard Java property format "
                         +"with the following properties defined for probedb "
                         +"database connection: username, password, url");
@@ -220,14 +292,21 @@ public class SparkProbeDb implements AutoCloseable {
              new SparkProbeDb (props.getProperty("url"),
                                props.getProperty("username"),
                                props.getProperty("password"))) {
-            Dataset<Row> df = probedb
-                .load("(select * from ncgc_sample "
-                      +"where smiles_iso is not null"
-                      //+" and rownum <= 1000"
-                      +")"
-                      )
-                ;
-            df.printSchema();
+            Dataset<Row> df;
+            if (argv.length > 1) {
+                df = probedb.loadFile(argv[1]);
+                df.show();
+            }
+            else {
+                df = probedb
+                    .loadSQL("(select * from ncgc_sample "
+                             +"where smiles_iso is not null"
+                             //+" and rownum <= 1000"
+                             +")"
+                             )
+                    ;
+                df.printSchema();
+            }
             probedb.generateFragments(df, "fragments");
         }
     }
