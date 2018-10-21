@@ -1,0 +1,3 @@
+url=jdbc:mysql://chembl.ncats.io/chembl24
+username=chembl
+password=

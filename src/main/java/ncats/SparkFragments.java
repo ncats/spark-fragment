@@ -1,4 +1,4 @@
-package probedb;
+package ncats;
 
 import java.io.*;
 import java.nio.file.*;
@@ -33,8 +33,9 @@ import tripod.chem.MolecularFramework;
 import lychi.LyChIStandardizer;
 import lychi.util.ChemUtil;
 
-public class SparkProbeDb implements AutoCloseable {
-    static final Logger logger = Logger.getLogger(SparkProbeDb.class.getName());
+public class SparkFragments implements AutoCloseable {
+    static final Logger logger =
+        Logger.getLogger(SparkFragments.class.getName());
 
     public static class GenerateFragments implements Function<Row, Row> {
 
@@ -75,15 +76,20 @@ public class SparkProbeDb implements AutoCloseable {
         }
 
         public Row call (Row row) {
-            String smiles = row.getString(0);
-            String id = row.getString(1);
+            String struc = row.getString(0); // STRUCTURE
+            String id = row.getString(1); // STRUC_ID
             try {
-                Molecule mol = getMolecule (smiles);
+                Molecule mol = getMolecule (struc);
                 String[] hk = LyChIStandardizer.hashKeyArray(mol);
                 String l5 = hk[hk.length-1];
-                
-                standardize (mol);
-                hk = LyChIStandardizer.hashKeyArray(mol);
+
+                try {
+                    standardize (mol);
+                    hk = LyChIStandardizer.hashKeyArray(mol);
+                }
+                catch (Exception ex) {
+                    logger.log(Level.SEVERE, "Can't standardize "+id, ex);
+                }
                 
                 java.util.Map<String, String> frags = new HashMap<>();
                 for (Enumeration<Molecule> en = generateFragments (mol);
@@ -91,9 +97,22 @@ public class SparkProbeDb implements AutoCloseable {
                     Molecule f = en.nextElement();
                     frags.put(f.getName(), ChemUtil.canonicalSMILES(f));
                 }
+
+                Object fmap = null;
+                if (frags.isEmpty()) {
+                    logger.log(Level.WARNING, "** Structure "+id
+                               +" has no fragments! **");
+                    /*
+                      functions.lit(null).cast
+                      (MapType.apply(DataTypes.StringType,
+                                       DataTypes.StringType));
+                    */
+                }
+                else 
+                    fmap = toScalaMap (frags);
                 
                 return RowFactory.create
-                    (id, hk[0], hk[1], hk[2], hk[3], l5, toScalaMap (frags));
+                    (id, hk[0], hk[1], hk[2], hk[3], l5, fmap);
             }
             catch (Exception ex) {
                 logger.log(Level.SEVERE,
@@ -123,7 +142,7 @@ public class SparkProbeDb implements AutoCloseable {
         }
     }
 
-    public static class QuerySamples
+    public static class QueryProbeDbSamples
         implements Function<String, Row>, AutoCloseable {
         final String jdbcUrl;
         final String username;
@@ -132,8 +151,8 @@ public class SparkProbeDb implements AutoCloseable {
         transient Connection con;
         transient PreparedStatement pstm;
 
-        public QuerySamples (String jdbcUrl,
-                             String username, String password) {
+        public QueryProbeDbSamples (String jdbcUrl,
+                                    String username, String password) {
             this.jdbcUrl = jdbcUrl;
             this.username = username;
             this.password = password;
@@ -148,7 +167,7 @@ public class SparkProbeDb implements AutoCloseable {
         ResultSet getSample (String id) throws SQLException {
             if (pstm == null) {
                 pstm = getConnection().prepareStatement
-                 ("select smiles_iso,supplier_id "
+                 ("select smiles_iso "
                   +"from ncgc_sample where sample_id = ? "
                   +"and smiles_iso is not null");
             }
@@ -160,8 +179,10 @@ public class SparkProbeDb implements AutoCloseable {
             try (ResultSet rs = getSample (id)) {
                 if (rs.next()) {
                     String smiles = rs.getString("smiles_iso");
-                    String supplier = rs.getString("supplier_id");
-                    return RowFactory.create(smiles, id, supplier);
+                    return RowFactory.create(smiles, id);
+                }
+                else {
+                    logger.log(Level.WARNING, "Can't lookup sample \""+id+"\"");
                 }
             }
             catch (SQLException ex) {
@@ -169,7 +190,7 @@ public class SparkProbeDb implements AutoCloseable {
                 ex.printStackTrace();
             }
             
-            return RowFactory.create(null, id, null);
+            return RowFactory.create(null, id);
         }
 
         public void close () throws Exception {
@@ -183,7 +204,7 @@ public class SparkProbeDb implements AutoCloseable {
     final String password;
     final SparkSession spark;
 
-    public SparkProbeDb (String jdbcUrl, String username, String password)
+    public SparkFragments (String jdbcUrl, String username, String password)
         throws Exception {
         if (jdbcUrl == null)
             throw new IllegalArgumentException ("No Jdbc URL specified!");
@@ -195,7 +216,7 @@ public class SparkProbeDb implements AutoCloseable {
             //.master("local[*]")
             .config("spark.driver.bindAddress", "127.0.0.1")
             .config("spark.driver.host", "127.0.0.1")
-            .appName(SparkProbeDb.class.getName())
+            .appName(SparkFragments.class.getName())
             .getOrCreate();
         this.jdbcUrl = jdbcUrl;
         this.username = username;
@@ -207,28 +228,36 @@ public class SparkProbeDb implements AutoCloseable {
     }
 
     public Dataset<Row> registry () throws Exception {
-        return loadSQL ("ncgc_sample");
+        return probeDbSQL ("ncgc_sample");
     }
     
-    public Dataset<Row> loadSQL (String sql) throws Exception {
+    public Dataset<Row> probeDbSQL (String sql) throws Exception {
+        return loadSQL (sql, "oracle.jdbc.driver.OracleDriver");        
+    }
+
+    public Dataset<Row> chemblSQL (String sql) throws Exception {
+        return loadSQL (sql, "com.mysql.jdbc.Driver");
+    }
+
+    protected Dataset<Row> loadSQL (String sql, String driver)
+        throws Exception {
         return spark.read()
             .format("jdbc")
             .option("url", jdbcUrl)
             .option("dbtable", sql)
             .option("user", username)
             .option("password", password)
-            .option("driver", "oracle.jdbc.driver.OracleDriver")
+            .option("driver", driver)
             .option("numPartitions", 10)
-            .load();
+            .load();        
     }
 
-    public Dataset<Row> loadFile (String file) throws Exception {
-        try (QuerySamples qmap = new QuerySamples
+    public Dataset<Row> probeDbFile (String file) throws Exception {
+        try (QueryProbeDbSamples qmap = new QueryProbeDbSamples
              (jdbcUrl, username, password)) {
             StructType schema = new StructType ()
-                .add("SMILES_ISO", DataTypes.StringType)
-                .add("SAMPLE_ID", DataTypes.StringType)
-                .add("SUPPLIER_ID", DataTypes.StringType)
+                .add("STRUCTURE", DataTypes.StringType)
+                .add("STRUC_ID", DataTypes.StringType, false)
                 ;
             JavaSparkContext jsc = new JavaSparkContext (spark.sparkContext());
             return spark.createDataFrame
@@ -238,8 +267,11 @@ public class SparkProbeDb implements AutoCloseable {
 
     public Dataset<Row> generateFragments (Dataset<Row> df, String output)
         throws Exception {
+        logger.info("### enumerating fragments for "+df.count()
+                    +" structures; output = "+output);
+        
         StructType schema = new StructType()
-            .add("SAMPLE_ID", DataTypes.StringType)
+            .add("STRUC_ID", DataTypes.StringType, false)
             .add("LyChI_H1", DataTypes.StringType)
             .add("LyChI_H2", DataTypes.StringType)
             .add("LyChI_H3", DataTypes.StringType)
@@ -249,21 +281,21 @@ public class SparkProbeDb implements AutoCloseable {
                                            DataTypes.StringType, false));
         
         df = spark.createDataFrame
-            (df.select("SMILES_ISO", "SAMPLE_ID","SUPPLIER_ID")
+            (df.select("STRUCTURE", "STRUC_ID")
              .javaRDD().repartition(10).map(new GenerateFragments()), schema);
         df.show();
         
-        df = df.select(df.col("SAMPLE_ID"),
+        df = df.select(df.col("STRUC_ID"),
                        df.col("LyChI_H1"),
                        df.col("LyChI_H2"),
                        df.col("LyChI_H3"),
                        df.col("LyChI_H4"),
                        df.col("LyChI_H5"),
-                       functions.explode(df.col("FRAGMENTS"))
+                       functions.explode_outer(df.col("FRAGMENTS"))
                        .as(new String[]{"FRAGMENT_H4", "FRAGMENT_SMILES"}));
         df.show();
 
-        df//.coalesce(1)
+        df.coalesce(1)
             .write()
             .mode(SaveMode.Overwrite)
             .format("com.databricks.spark.csv")
@@ -277,37 +309,55 @@ public class SparkProbeDb implements AutoCloseable {
 
     public static void main (String[] argv) throws Exception {
         if (argv.length == 0) {
-            logger.info("Usage: "+SparkProbeDb.class.getName()
-                        +" DB.props [SAMPLE_FILE]");
+            logger.info("Usage: "+SparkFragments.class.getName()
+                        +" [probedb|chembl].props [SAMPLE_FILE]");
             logger.info("where DB.props is a standard Java property format "
                         +"with the following properties defined for probedb "
-                        +"database connection: username, password, url");
+                        +"or chembl database connection: username, password, "
+                        +"url");
             System.exit(1);
         }
 
         Properties props = new Properties ();
-        props.load(new FileReader (argv[0]));
-            
-        try (SparkProbeDb probedb =
-             new SparkProbeDb (props.getProperty("url"),
-                               props.getProperty("username"),
-                               props.getProperty("password"))) {
+        File dbconf = new File (argv[0]);
+        props.load(new FileReader (dbconf));
+
+        String fname = dbconf.getName().toLowerCase();
+        try (SparkFragments spark =
+             new SparkFragments (props.getProperty("url"),
+                                 props.getProperty("username"),
+                                 props.getProperty("password"))) {
             Dataset<Row> df;
             if (argv.length > 1) {
-                df = probedb.loadFile(argv[1]);
+                df = spark.probeDbFile(argv[1]);
                 df.show();
             }
             else {
-                df = probedb
-                    .loadSQL("(select * from ncgc_sample "
-                             +"where smiles_iso is not null"
-                             //+" and rownum <= 1000"
-                             +")"
-                             )
-                    ;
+                if (fname.startsWith("chembl")) {
+                    df = spark.chemblSQL
+                        ("(select a.molfile as STRUCTURE, "
+                         +"b.chembl_id AS STRUC_ID "
+                         +"from compound_structures a, "
+                         +"chembl_id_lookup b where "
+                         +"a.molregno = b.entity_id and "
+                         +"b.entity_type='COMPOUND'"
+                         //+" limit 1000"
+                         +") as chembl");
+                }
+                else {
+                    df = spark.probeDbSQL
+                        ("(select smiles_iso as STRUCTURE, "
+                         +"sample_id as STRUC_ID "
+                         +"from ncgc_sample "
+                         +"where smiles_iso is not null"
+                         //+" and rownum <= 1000"
+                         +")"
+                         )
+                        ;
+                }
                 df.printSchema();
             }
-            probedb.generateFragments(df, "fragments");
+            spark.generateFragments(df, "fragments");
         }
     }
 }

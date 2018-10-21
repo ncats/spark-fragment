@@ -1,11 +1,12 @@
-Simple Spark setup to process ProbeDb
-=====================================
+Simple Spark setup to process fragments
+=======================================
 
-This repository provides a simple setup to process ProbeDb with
-Spark on a local cluster.
+This repository provides a simple setup to process fragments with
+Spark on a local standalone cluster.
 
 ```
 sbt package
+sbt assemblyPackageDependency
 ```
 
 Use the script ```submit.sh``` as an example on how to do Spark
