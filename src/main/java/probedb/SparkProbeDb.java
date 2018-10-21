@@ -192,7 +192,7 @@ public class SparkProbeDb implements AutoCloseable {
         
         spark = SparkSession
             .builder()
-            .master("local[*]")
+            //.master("local[*]")
             .config("spark.driver.bindAddress", "127.0.0.1")
             .config("spark.driver.host", "127.0.0.1")
             .appName(SparkProbeDb.class.getName())
@@ -218,7 +218,7 @@ public class SparkProbeDb implements AutoCloseable {
             .option("user", username)
             .option("password", password)
             .option("driver", "oracle.jdbc.driver.OracleDriver")
-            //.option("numPartitions", 10)
+            .option("numPartitions", 10)
             .load();
     }
 
@@ -250,7 +250,7 @@ public class SparkProbeDb implements AutoCloseable {
         
         df = spark.createDataFrame
             (df.select("SMILES_ISO", "SAMPLE_ID","SUPPLIER_ID")
-             .javaRDD().map(new GenerateFragments()), schema);
+             .javaRDD().repartition(10).map(new GenerateFragments()), schema);
         df.show();
         
         df = df.select(df.col("SAMPLE_ID"),
