@@ -232,24 +232,35 @@ public class SparkFragments implements AutoCloseable {
     }
     
     public Dataset<Row> probeDbSQL (String sql) throws Exception {
-        return loadSQL (sql, "oracle.jdbc.driver.OracleDriver");        
-    }
-
-    public Dataset<Row> chemblSQL (String sql) throws Exception {
-        return loadSQL (sql, "com.mysql.jdbc.Driver");
-    }
-
-    protected Dataset<Row> loadSQL (String sql, String driver)
-        throws Exception {
         return spark.read()
             .format("jdbc")
             .option("url", jdbcUrl)
             .option("dbtable", sql)
             .option("user", username)
             .option("password", password)
-            .option("driver", driver)
+            .option("driver", "oracle.jdbc.driver.OracleDriver")
             .option("numPartitions", 10)
-            .load();        
+            .option("fetchsize", 1000)
+            .option("partitionColumn", "partcol")
+            .option("lowerBound", 0)
+            .option("upperBound", 1000000)
+            .load();
+    }
+
+    public Dataset<Row> chemblSQL (String sql) throws Exception {
+        return spark.read()
+            .format("jdbc")
+            .option("url", jdbcUrl)
+            .option("dbtable", sql)
+            .option("user", username)
+            .option("password", password)
+            .option("driver", "com.mysql.jdbc.Driver")
+            .option("numPartitions", 10)
+            .option("fetchsize", 1)
+            .option("partitionColumn", "molregno")
+            .option("lowerBound", 0)
+            .option("upperBound", 2200000)
+            .load();
     }
 
     public Dataset<Row> probeDbFile (String file) throws Exception {
@@ -282,7 +293,7 @@ public class SparkFragments implements AutoCloseable {
         
         df = spark.createDataFrame
             (df.select("STRUCTURE", "STRUC_ID")
-             .javaRDD().repartition(10).map(new GenerateFragments()), schema);
+             .javaRDD().map(new GenerateFragments()), schema);
         df.show();
         
         df = df.select(df.col("STRUC_ID"),
@@ -336,8 +347,8 @@ public class SparkFragments implements AutoCloseable {
                 if (fname.startsWith("chembl")) {
                     df = spark.chemblSQL
                         ("(select a.molfile as STRUCTURE, "
-                         +"b.chembl_id AS STRUC_ID "
-                         +"from compound_structures a, "
+                         +"b.chembl_id as STRUC_ID, "
+                         +"a.molregno from compound_structures a, "
                          +"chembl_id_lookup b where "
                          +"a.molregno = b.entity_id and "
                          +"b.entity_type='COMPOUND'"
@@ -347,14 +358,20 @@ public class SparkFragments implements AutoCloseable {
                 else {
                     df = spark.probeDbSQL
                         ("(select smiles_iso as STRUCTURE, "
-                         +"sample_id as STRUC_ID "
-                         +"from ncgc_sample "
+                         +"sample_id as STRUC_ID, "
+                         +"rownum as partcol from ncgc_sample "
                          +"where smiles_iso is not null"
                          //+" and rownum <= 1000"
                          +")"
                          )
                         ;
                 }
+                df.write()
+                    .mode(SaveMode.Overwrite)
+                    .format("com.databricks.spark.csv")
+                    .option("header", "true")
+                    .save("dump");
+                
                 df.printSchema();
             }
             spark.generateFragments(df, "fragments");

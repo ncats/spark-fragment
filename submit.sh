@@ -6,7 +6,7 @@ jar="target/scala-2.11/spark-fragments_2.11-0.0.1.jar"
 cmd="../spark-2.3.1-bin-hadoop2.7/bin/spark-submit \
     --jars $libs
     --master spark://`hostname`:7077 \
-    --executor-memory 4G \
+    --executor-memory 8G \
     --total-executor-cores 24 \
     --class ncats.SparkFragments $jar"
 exec="$cmd $*" 
