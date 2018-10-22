@@ -214,8 +214,8 @@ public class SparkFragments implements AutoCloseable {
         spark = SparkSession
             .builder()
             //.master("local[*]")
-            .config("spark.driver.bindAddress", "127.0.0.1")
-            .config("spark.driver.host", "127.0.0.1")
+            //.config("spark.driver.bindAddress", "127.0.0.1")
+            //.config("spark.driver.host", "127.0.0.1")
             .appName(SparkFragments.class.getName())
             .getOrCreate();
         this.jdbcUrl = jdbcUrl;
@@ -227,10 +227,27 @@ public class SparkFragments implements AutoCloseable {
         spark.stop();
     }
 
-    public Dataset<Row> registry () throws Exception {
-        return probeDbSQL ("ncgc_sample");
+    public Dataset<Row> loadProbeDb () throws Exception {
+        return probeDbSQL ("(select smiles_iso as STRUCTURE, "
+                           +"sample_id as STRUC_ID, "
+                           +"rownum as partcol from ncgc_sample "
+                           +"where smiles_iso is not null"
+                           //+" and rownum <= 1000"
+                           +")"
+                           );
     }
-    
+
+    public Dataset<Row> loadChEMBL () throws Exception {
+        return chemblSQL ("(select a.molfile as STRUCTURE, "
+                          +"b.chembl_id as STRUC_ID, "
+                          +"a.molregno from compound_structures a, "
+                          +"chembl_id_lookup b where "
+                          +"a.molregno = b.entity_id and "
+                          +"b.entity_type='COMPOUND'"
+                          //+" limit 1000"
+                          +") as chembl");
+    }
+
     public Dataset<Row> probeDbSQL (String sql) throws Exception {
         return spark.read()
             .format("jdbc")
@@ -278,8 +295,10 @@ public class SparkFragments implements AutoCloseable {
 
     public Dataset<Row> generateFragments (Dataset<Row> df, String output)
         throws Exception {
-        logger.info("### enumerating fragments for "+df.count()
-                    +" structures; output = "+output);
+        JavaRDD<Row> rdd = df.select("STRUCTURE", "STRUC_ID").javaRDD();
+        logger.info("### enumerating fragments for "+rdd.count()
+                    +" structures; numParitions = "+rdd.getNumPartitions()
+                    +" output = "+output);
         
         StructType schema = new StructType()
             .add("STRUC_ID", DataTypes.StringType, false)
@@ -290,10 +309,7 @@ public class SparkFragments implements AutoCloseable {
             .add("LyChI_H5", DataTypes.StringType)
             .add("FRAGMENTS", new MapType (DataTypes.StringType,
                                            DataTypes.StringType, false));
-        
-        df = spark.createDataFrame
-            (df.select("STRUCTURE", "STRUC_ID")
-             .javaRDD().map(new GenerateFragments()), schema);
+        df = spark.createDataFrame(rdd.map(new GenerateFragments()), schema);
         df.show();
         
         df = df.select(df.col("STRUC_ID"),
@@ -306,7 +322,7 @@ public class SparkFragments implements AutoCloseable {
                        .as(new String[]{"FRAGMENT_H4", "FRAGMENT_SMILES"}));
         df.show();
 
-        df.coalesce(1)
+        df//.coalesce(1)
             .write()
             .mode(SaveMode.Overwrite)
             .format("com.databricks.spark.csv")
@@ -344,34 +360,15 @@ public class SparkFragments implements AutoCloseable {
                 df.show();
             }
             else {
-                if (fname.startsWith("chembl")) {
-                    df = spark.chemblSQL
-                        ("(select a.molfile as STRUCTURE, "
-                         +"b.chembl_id as STRUC_ID, "
-                         +"a.molregno from compound_structures a, "
-                         +"chembl_id_lookup b where "
-                         +"a.molregno = b.entity_id and "
-                         +"b.entity_type='COMPOUND'"
-                         //+" limit 1000"
-                         +") as chembl");
-                }
-                else {
-                    df = spark.probeDbSQL
-                        ("(select smiles_iso as STRUCTURE, "
-                         +"sample_id as STRUC_ID, "
-                         +"rownum as partcol from ncgc_sample "
-                         +"where smiles_iso is not null"
-                         //+" and rownum <= 1000"
-                         +")"
-                         )
-                        ;
-                }
+                df = fname.startsWith("chembl") 
+                    ? spark.loadChEMBL() : spark.loadProbeDb();
+                /*
                 df.write()
                     .mode(SaveMode.Overwrite)
                     .format("com.databricks.spark.csv")
                     .option("header", "true")
                     .save("dump");
-                
+                */
                 df.printSchema();
             }
             spark.generateFragments(df, "fragments");
