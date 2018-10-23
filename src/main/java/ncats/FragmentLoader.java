@@ -22,15 +22,16 @@ public class FragmentLoader implements AutoCloseable {
         con.setAutoCommit(false);
         pstm = con.prepareStatement
             ("insert into lychi_fragment(id,lychi_h1,lychi_h2,lychi_h3,"
-             +"lychi_h4,lychi_h5,fragment_h4,fragment_smiles,source,created) "
-             +"values(?,?,?,?,?,?,?,?,?,?)");
+             +"lychi_h4,lychi_h5,fragment_h4,fragment_smiles,source,"
+             +"created,batch_file) values(?,?,?,?,?,?,?,?,?,?,?)");
     }
 
     public void close () throws Exception {
         con.close();
     }
 
-    public int load (String source, InputStream is) throws Exception {
+    public int load (String source, String batch, InputStream is) 
+        throws Exception {
         int rows = 0;
         try (BufferedReader br = new BufferedReader
              (new InputStreamReader (is))) {
@@ -64,6 +65,7 @@ public class FragmentLoader implements AutoCloseable {
                     pstm.setString(9, source);
                     pstm.setTimestamp(10, new Timestamp
                                       (System.currentTimeMillis()));
+                    pstm.setString(11, batch);
                     if (pstm.executeUpdate() > 0) {
                         ++rows;
                         if (rows % 1000 == 0) {
@@ -74,7 +76,7 @@ public class FragmentLoader implements AutoCloseable {
                 }
             }
             con.commit();
-            logger.info("==== "+rows+" inserted!");
+            logger.info("==== "+batch+": "+rows+" row(s) inserted!");
         }
         return rows;
     }
@@ -82,8 +84,7 @@ public class FragmentLoader implements AutoCloseable {
     public int load (String source, File... files) throws Exception {
         int rows = 0;
         for (File f : files) {
-            int r = load (source, new FileInputStream (f));
-            logger.info("===== "+f.getName()+": "+r+" row(s) inserted!");
+            int r = load (source, f.getName(), new FileInputStream (f));
             rows += r;
         }
         return rows;
